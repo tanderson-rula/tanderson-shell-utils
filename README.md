@@ -7,7 +7,7 @@ Custom zsh shell functions and aliases, sourced into the shell environment. Each
 Add the following to your `~/.zshrc` to source all modules:
 
 ```zsh
-for f in ~/.zsh/functions/*.zsh; do
+for f in <repo-dir>/*.zsh; do
   source "$f"
 done
 ```
