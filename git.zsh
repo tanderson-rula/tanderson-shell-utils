@@ -11,7 +11,7 @@ gw() {
 alias gmain="git checkout main && git pull"
 
 # --- rebase current branch onto latest main ---
-gup() {
+grum() {
   git pull origin main --rebase
 }
 

@@ -2,6 +2,26 @@
 
 Custom zsh shell functions and aliases, sourced into the shell environment. Each `.zsh` file is a self-contained module of related helpers.
 
+## Installation
+
+Add the following to your `~/.zshrc` to source all modules:
+
+```zsh
+for f in ~/.zsh/functions/*.zsh; do
+  source "$f"
+done
+```
+
+Or source individual files if you only want specific modules:
+
+```zsh
+source ~/.zsh/functions/git.zsh
+source ~/.zsh/functions/dbt.zsh
+source ~/.zsh/functions/utils.zsh
+```
+
+Restart your shell or run `source ~/.zshrc` to pick up changes.
+
 ## dbt.zsh
 
 Wrappers around the dbt CLI. All build/run commands automatically apply `--vars 'dev_disable: true' --defer --state deferral`. The dbt binary is resolved from the active virtualenv (`$VIRTUAL_ENV/bin/dbt`) when available, falling back to `dbt` on `$PATH`.
@@ -28,7 +48,7 @@ Git shortcuts and environment helpers.
 |----------------|-------|-------------|
 | `gw`    | `gw <branch-name>` | Creates and checks out a new branch (`git checkout -b`). |
 | `gmain` | `gmain` | Checks out `main` and pulls latest (`git checkout main && git pull`). |
-| `gup`   | `gup` | Rebases the current branch onto latest `origin/main` (`git pull origin main --rebase`). |
+| `grum`  | `grum` | Rebases the current branch onto latest `origin/main` (`git pull origin main --rebase`). |
 | `gwt`   | `gwt <branch>` | Creates a worktree at `../.worktrees/<branch>`, creates the branch from `main` if new, auto-activates the venv, and `cd`s into it. |
 | `gwtl`  | `gwtl` | Lists all active worktrees. |
 | `gwtcd` | `gwtcd <branch>` | `cd` into an existing worktree. |
