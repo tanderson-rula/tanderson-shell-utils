@@ -37,7 +37,12 @@ dbdp() {
   echo "Running: dbt build -s $* --vars 'dev_disable: true' --defer --state deferral --log-format json (piped)"
   setopt localoptions pipefail
   "$dbt_bin" build -s "$@" --vars 'dev_disable: true' --defer --state deferral --log-format json 2>&1 | python3 -u -c '
-import sys, json, datetime as dt
+import sys, json, datetime as dt, select
+
+W = sys.stdout.write
+YELLOW = "\033[33m"; GREEN = "\033[32m"; RED = "\033[31m"
+DIM = "\033[2m"; RESET = "\033[0m"; CLR = "\033[2K"
+SPIN = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
 
 def parse_ts(s):
     if not s:
@@ -49,77 +54,184 @@ def parse_ts(s):
     except Exception:
         return None
 
-starts = {}
-active = {}
-
-def alloc_slot():
-    s = 1
-    while s in active:
-        s += 1
-    return s
-
-def fmt_time(ts):
-    return ts.strftime("%H:%M:%S") if ts else "        "
+nodes = []
+id_idx = {}
+seen = set()
+total = 0
+extra = 0
+tick = 0
+issues = []
 
 PASS_THROUGH = {"MainReportVersion", "EndOfRunSummary", "LogFreshnessResult",
-                "RunResultError", "RunResultWarning", "RunResultFailure",
                 "CommandCompleted", "LogSeedResult", "LogSnapshotResult"}
+CAPTURE_ISSUES = {"RunResultError", "RunResultFailure", "RunResultWarning"}
 STARTED = {"compiling", "executing", "started"}
-FINISHED = {"success", "error", "fail", "skipped"}
-seen_started = set()
+FINISHED = {"success", "error", "fail", "skipped", "pass", "warn"}
+SHOW_TYPES = {"model", "test"}
 
-for line in sys.stdin:
+cw = {"name": 0, "mat": 0, "rel": 0, "dur": 0}
+
+def pad(val, col):
+    return val.ljust(cw[col])
+
+def render(m):
+    s = m["st"]
+    n = pad(m["name"], "name")
+    mat = pad(m.get("mat", ""), "mat")
+    if s == "running":
+        elapsed = ""
+        st = m.get("start_ts")
+        if st:
+            e = (dt.datetime.now(dt.timezone.utc) - st).total_seconds()
+            if e >= 60:
+                elapsed = f"{int(e // 60)}m{int(e % 60):02d}s"
+            else:
+                elapsed = f"{e:.0f}s"
+        return f"  {YELLOW}{SPIN[tick % len(SPIN)]} {n}  {mat}  {elapsed}{RESET}"
+    dur = pad(m.get("dur", ""), "dur")
+    ts = m.get("end_ts", "")
+    rel = pad(m.get("rel", ""), "rel")
+    cols = f"  {DIM}{mat}  {rel}  {dur}  {ts}{RESET}"
+    if s in ("success", "pass"):
+        return f"  {GREEN}✓ {n}{RESET}{cols}"
+    if s in ("error", "fail"):
+        return f"  {RED}✗ {n}{RESET}{cols}"
+    if s == "warn":
+        return f"  {YELLOW}! {n}{RESET}{cols}"
+    return f"  {DIM}○ {n}  skipped{RESET}"
+
+def update_line(idx):
+    up = total + extra - nodes[idx]["line"] - 1
+    if up > 0:
+        W(f"\033[{up}A")
+    W(f"\r{CLR}{render(nodes[idx])}")
+    if up > 0:
+        W(f"\033[{up}B")
+    W("\r")
+    sys.stdout.flush()
+
+def rerender_all():
+    for i in range(len(nodes)):
+        update_line(i)
+
+def grow_col(col, val):
+    if len(val) > cw[col]:
+        cw[col] = len(val)
+        return True
+    return False
+
+def tick_spinners():
+    global tick
+    tick += 1
+    for m in nodes:
+        if m["st"] == "running":
+            update_line(id_idx[m["uid"]])
+
+def info_line(text):
+    global extra
+    W(text + "\n")
+    sys.stdout.flush()
+    extra += 1
+
+def process(line):
+    global total, extra
     line = line.strip()
     if not line.startswith("{"):
-        print(line)
-        sys.stdout.flush()
-        continue
+        info_line(line)
+        return
     try:
         ev = json.loads(line)
     except Exception:
-        print(line)
-        sys.stdout.flush()
-        continue
-
+        info_line(line)
+        return
     info = ev.get("info", {})
     data = ev.get("data", {})
     event_name = info.get("name", "")
     ts = parse_ts(info.get("ts"))
     msg = info.get("msg", "")
-
+    if event_name in CAPTURE_ISSUES and msg:
+        issues.append((event_name, msg))
+    if event_name == "LogTestResult" and msg and "PASS" not in msg:
+        issues.append((event_name, msg))
     if event_name in PASS_THROUGH:
-        print(f"{fmt_time(ts)}  {msg}")
-        sys.stdout.flush()
-        continue
-
+        info_line(f"  {DIM}{msg}{RESET}")
+        return
     node = data.get("node_info") or {}
-    unique_id = node.get("unique_id") or node.get("node_id")
+    uid = node.get("unique_id") or node.get("node_id")
     rtype = node.get("resource_type")
     name = node.get("node_name") or node.get("name")
     status = (node.get("node_status") or "").lower()
-
-    if not unique_id or rtype != "model" or not name:
-        continue
-
-    if status in STARTED and unique_id not in seen_started:
-        seen_started.add(unique_id)
-        slot = alloc_slot()
-        active[slot] = unique_id
-        starts[unique_id] = (ts, slot)
-        print(f"{fmt_time(ts)}  [{slot}/{len(active)}]  ▶ START  {name}")
+    if not uid or rtype not in SHOW_TYPES or not name:
+        return
+    if rtype == "test":
+        label = f"test: {name}"
+    else:
+        label = name
+    mat = node.get("materialized", "") if rtype == "model" else rtype
+    nr = node.get("node_relation") or {}
+    db = nr.get("database") or node.get("database", "")
+    schema = nr.get("schema") or node.get("schema", "")
+    alias = nr.get("alias") or node.get("alias", "") or name
+    rel = ".".join(p for p in [db, schema, alias] if p) if rtype == "model" else ""
+    if status in STARTED and uid not in seen:
+        seen.add(uid)
+        m = {"uid": uid, "name": label, "start_ts": ts, "st": "running", "line": total}
+        if mat:
+            m["mat"] = mat
+        changed = grow_col("name", label) or grow_col("mat", mat)
+        id_idx[uid] = len(nodes)
+        nodes.append(m)
+        if changed and len(nodes) > 1:
+            rerender_all()
+        W(render(m) + "\n")
         sys.stdout.flush()
+        total += 1
+    elif status in FINISHED and uid in seen:
+        seen.discard(uid)
+        idx = id_idx[uid]
+        m = nodes[idx]
+        m["st"] = status
+        if mat:
+            m["mat"] = mat
+        if rel:
+            m["rel"] = rel
+        if ts and m.get("start_ts"):
+            d = (ts - m["start_ts"]).total_seconds()
+            m["dur"] = f"{d:.1f}s"
+            grow_col("dur", m["dur"])
+        if ts:
+            m["end_ts"] = ts.strftime("%H:%M:%S")
+        changed = grow_col("mat", mat) or grow_col("rel", rel)
+        if changed:
+            rerender_all()
+        else:
+            update_line(idx)
 
-    elif status in FINISHED and unique_id in seen_started:
-        seen_started.discard(unique_id)
-        start_ts, slot = starts.pop(unique_id, (None, None))
-        if slot in active:
-            active.pop(slot, None)
-        duration = (ts - start_ts).total_seconds() if ts and start_ts else None
-        dur_str = f"{duration:.2f}s" if duration is not None else "?"
-        icon = "✓" if status == "success" else "✗"
-        label = status.upper()
-        print(f"{fmt_time(ts)}  [{slot or chr(63)}->{len(active)}]  {icon} {label:7s} {name}  ({dur_str})")
-        sys.stdout.flush()
+def print_issues():
+    if not issues:
+        return
+    rule = "-" * 60
+    W(f"\n{RED}{rule}{RESET}\n")
+    for evt, msg in issues:
+        if "Error" in evt or "Failure" in evt:
+            W(f"  {RED}✗ {msg}{RESET}\n")
+        else:
+            W(f"  {YELLOW}! {msg}{RESET}\n")
+    W(f"{RED}{rule}{RESET}\n")
+    sys.stdout.flush()
+
+fd = sys.stdin.fileno()
+while True:
+    ready, _, _ = select.select([fd], [], [], 0.08)
+    if ready:
+        line = sys.stdin.readline()
+        if not line:
+            break
+        process(line)
+    else:
+        if any(m["st"] == "running" for m in nodes):
+            tick_spinners()
+print_issues()
 '
 }
 
