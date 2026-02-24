@@ -31,3 +31,8 @@ output_dir_to_file() {
 
   echo "Wrote directory structure to dir_output.csv"
 }
+
+alias va="source .venv/bin/activate"
+
+# Reload Shell
+alias rsrc="source ~/.zshrc && source ~/.zshenv && echo 'Shell configuration reloaded.'"

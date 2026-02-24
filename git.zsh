@@ -9,4 +9,3 @@ gw() {
 }
 
 alias gmain="git checkout main && git pull"
-alias va="source .venv/bin/activate"
