@@ -9,7 +9,7 @@ This repo contains custom zsh shell functions and aliases, sourced into the user
 ## Architecture
 
 - **dbt.zsh** — dbt CLI wrappers that auto-resolve the dbt binary from the active virtualenv (`_dbt_bin`). Standard commands (`dbd`, `dbr`, `dbdf`) and pretty variants (`dbdp`, `dbrp`, `dbdfp`) that pipe JSON logs through an inline Python formatter with colored output, spinners, elapsed timers, and an error summary. Includes a model search function (`dbtls`) and filesystem-based zsh tab completion for model names.
-- **git.zsh** — Git shortcuts: `gw <branch>` (create + checkout branch), `gmain` (checkout main + pull), `va` (activate `.venv`).
+- **git.zsh** — Git shortcuts: `gw <branch>` (create + checkout branch), `gmain` (checkout main + pull), `gup` (rebase current branch onto latest `origin/main`). Worktree helpers: `gwt <branch>` (create worktree in `../.worktrees/<branch>`, auto-activate venv, and cd into it), `gwtl` (list worktrees), `gwtcd <branch>` (cd into existing worktree), `gwtd <branch>` (remove worktree, prompt to delete branch).
 - **utils.zsh** — General utilities: `output_dir_to_file` exports a directory tree to `dir_output.csv`.
 
 ## Conventions
