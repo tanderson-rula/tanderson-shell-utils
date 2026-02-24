@@ -49,10 +49,7 @@ Git shortcuts and environment helpers.
 | `gw`    | `gw <branch-name>` | Creates and checks out a new branch (`git checkout -b`). |
 | `gmain` | `gmain` | Checks out `main` and pulls latest (`git checkout main && git pull`). |
 | `grum`  | `grum` | Rebases the current branch onto latest `origin/main` (`git pull origin main --rebase`). |
-| `gwt`   | `gwt <branch>` | Creates a worktree at `../.worktrees/<branch>`, creates the branch from `main` if new, auto-activates the venv, and `cd`s into it. |
-| `gwtl`  | `gwtl` | Lists all active worktrees. |
-| `gwtcd` | `gwtcd <branch>` | `cd` into an existing worktree. |
-| `gwtd`  | `gwtd <branch>` | Removes the worktree and prompts to delete the branch. |
+
 
 ## utils.zsh
 
