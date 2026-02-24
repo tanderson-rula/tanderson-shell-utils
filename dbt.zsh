@@ -9,40 +9,14 @@ _dbt_bin() {
   fi
 }
 
-# dbtls = "Search dbt ls for a specific output. Takes a selector as the first arg and search pattern as the second arg"
-dbtls() {
-  if (( $# < 2 )); then
-    echo "Usage: dbtls <dbt selector> <rg pattern...>"
-    return 1
-  fi
-
-  local selector="$1"
-  shift
-
-  local dbt_bin="$(_dbt_bin)"
-  "$dbt_bin" ls -s "$selector" --resource-type model --output name --quiet 2>/dev/null \
-    | rg --color=always "$@"
-}
-
-# dbt build with deferral. Args are passed as selectors
-dbd() {
-  local dbt_bin="$(_dbt_bin)"
-  echo "Running: dbt build -s $* --vars 'dev_disable: true' --defer --state deferral"
-  "$dbt_bin" build -s "$@" --vars 'dev_disable: true' --defer --state deferral
-}
-
-# dbt build with deferral + log formatting. Args are passed as selectors
-dbdp() {
-  local dbt_bin="$(_dbt_bin)"
-  echo "Running: dbt build -s $* --vars 'dev_disable: true' --defer --state deferral --log-format json (piped)"
-  setopt localoptions pipefail
-  "$dbt_bin" build -s "$@" --vars 'dev_disable: true' --defer --state deferral --log-format json 2>&1 | python3 -u -c '
+# --- shared log formatter (Python, no single quotes) ---
+read -r -d '' _DBT_FMT <<'PYEOF'
 import sys, json, datetime as dt, select
 
 W = sys.stdout.write
 YELLOW = "\033[33m"; GREEN = "\033[32m"; RED = "\033[31m"
 DIM = "\033[2m"; RESET = "\033[0m"; CLR = "\033[2K"
-SPIN = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"]
+SPIN = ["\u28cb","\u28d9","\u28f9","\u28f8","\u28fc","\u28f4","\u28e6","\u28e7","\u28c7","\u28cf"]
 
 def parse_ts(s):
     if not s:
@@ -93,12 +67,12 @@ def render(m):
     rel = pad(m.get("rel", ""), "rel")
     cols = f"  {DIM}{mat}  {rel}  {dur}  {ts}{RESET}"
     if s in ("success", "pass"):
-        return f"  {GREEN}✓ {n}{RESET}{cols}"
+        return f"  {GREEN}\u2713 {n}{RESET}{cols}"
     if s in ("error", "fail"):
-        return f"  {RED}✗ {n}{RESET}{cols}"
+        return f"  {RED}\u2717 {n}{RESET}{cols}"
     if s == "warn":
         return f"  {YELLOW}! {n}{RESET}{cols}"
-    return f"  {DIM}○ {n}  skipped{RESET}"
+    return f"  {DIM}\u25cb {n}  skipped{RESET}"
 
 def update_line(idx):
     up = total + extra - nodes[idx]["line"] - 1
@@ -214,7 +188,7 @@ def print_issues():
     W(f"\n{RED}{rule}{RESET}\n")
     for evt, msg in issues:
         if "Error" in evt or "Failure" in evt:
-            W(f"  {RED}✗ {msg}{RESET}\n")
+            W(f"  {RED}\u2717 {msg}{RESET}\n")
         else:
             W(f"  {YELLOW}! {msg}{RESET}\n")
     W(f"{RED}{rule}{RESET}\n")
@@ -232,22 +206,46 @@ while True:
         if any(m["st"] == "running" for m in nodes):
             tick_spinners()
 print_issues()
-'
+PYEOF
+
+# --- core helpers ---
+
+# Run a dbt subcommand with standard deferral flags
+_dbt_deferred() {
+  local dbt_bin="$(_dbt_bin)"
+  echo "Running: dbt $* --vars 'dev_disable: true' --defer --state deferral"
+  "$dbt_bin" "$@" --vars 'dev_disable: true' --defer --state deferral
 }
 
-# dbt run with deferral. Args are passed as selectors
-dbr() {
+# Run a dbt subcommand with deferral flags + pretty log formatter
+_dbt_deferred_pretty() {
   local dbt_bin="$(_dbt_bin)"
-  echo "Running: dbt run -s $* --vars 'dev_disable: true' --defer --state deferral"
-  "$dbt_bin" run -s "$@" --vars 'dev_disable: true' --defer --state deferral
+  echo "Running: dbt $* --vars 'dev_disable: true' --defer --state deferral (pretty)"
+  setopt localoptions pipefail
+  "$dbt_bin" "$@" --vars 'dev_disable: true' --defer --state deferral --log-format json 2>&1 \
+    | python3 -u -c "$_DBT_FMT"
 }
 
-# dbt build full-refresh with deferral. Args are passed as selectors
-dbdf() {
+# --- user-facing commands ---
+
+# dbtls: search dbt ls output. Takes a selector as the first arg and search pattern as the second
+dbtls() {
+  if (( $# < 2 )); then
+    echo "Usage: dbtls <dbt selector> <rg pattern...>"
+    return 1
+  fi
+  local selector="$1"; shift
   local dbt_bin="$(_dbt_bin)"
-  echo "Running: dbt build -s $* --vars 'dev_disable: true' --defer --state deferral --full-refresh"
-  "$dbt_bin" build -s "$@" --vars 'dev_disable: true' --full-refresh --defer --state deferral
+  "$dbt_bin" ls -s "$selector" --resource-type model --output name --quiet 2>/dev/null \
+    | rg --color=always "$@"
 }
+
+dbd()   { _dbt_deferred build -s "$@"; }
+dbdp()  { _dbt_deferred_pretty build -s "$@"; }
+dbr()   { _dbt_deferred run -s "$@"; }
+dbrp()  { _dbt_deferred_pretty run -s "$@"; }
+dbdf()  { _dbt_deferred build -s "$@" --full-refresh; }
+dbdfp() { _dbt_deferred_pretty build -s "$@" --full-refresh; }
 
 # ---- fast model-name completion from filesystem (zsh) ----
 typeset -ga _DBT_FS_MODEL_CACHE
@@ -308,5 +306,7 @@ _dbd_complete() {
 
 compdef _dbd_complete dbd
 compdef _dbd_complete dbdp
-compdef _dbd_complete dbdf
 compdef _dbd_complete dbr
+compdef _dbd_complete dbrp
+compdef _dbd_complete dbdf
+compdef _dbd_complete dbdfp

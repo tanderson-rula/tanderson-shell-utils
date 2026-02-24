@@ -8,12 +8,16 @@ Wrappers around the dbt CLI. All build/run commands automatically apply `--vars 
 
 All selector-based commands support zsh tab completion for model names (filesystem-cached with a 5s TTL) and dbt selector prefixes (`tag:`, `path:`, `+`, etc.).
 
+Each command has a standard version and a pretty (`p`) variant. The pretty variants pipe JSON logs through a live formatter with colored spinners, elapsed timers, aligned columns, and an error/warning summary at the end.
+
 | Function | Usage | Description |
 |----------|-------|-------------|
 | `dbd`    | `dbd <selectors>` | `dbt build` with deferral. |
-| `dbdp`   | `dbdp <selectors>` | Same as `dbd` but pipes JSON logs through a formatter that shows a live timeline of model starts, concurrency slots, and durations. Only model events are displayed. |
+| `dbdp`   | `dbdp <selectors>` | Pretty variant of `dbd`. |
 | `dbr`    | `dbr <selectors>` | `dbt run` with deferral. |
+| `dbrp`   | `dbrp <selectors>` | Pretty variant of `dbr`. |
 | `dbdf`   | `dbdf <selectors>` | `dbt build --full-refresh` with deferral. |
+| `dbdfp`  | `dbdfp <selectors>` | Pretty variant of `dbdf`. |
 | `dbtls`  | `dbtls <selector> <pattern>` | Runs `dbt ls` for models matching the selector, then filters output through `rg` with the given pattern. |
 
 ## git.zsh
