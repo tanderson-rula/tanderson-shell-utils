@@ -137,8 +137,11 @@ def process(line):
     status = (node.get("node_status") or "").lower()
     if not uid or rtype not in SHOW_TYPES or not name:
         return
+    MAX_NAME = 80
     if rtype == "test":
         label = f"test: {name}"
+        if len(label) > MAX_NAME:
+            label = label[:MAX_NAME - 1] + "\u2026"
     else:
         label = name
     mat = node.get("materialized", "") if rtype == "model" else rtype
