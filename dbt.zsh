@@ -30,11 +30,11 @@ def parse_ts(s):
 
 nodes = []
 id_idx = {}
-seen = set()
 total = 0
 extra = 0
 tick = 0
 issues = []
+model_tests = {}  # model_name -> [uid, ...]
 
 PASS_THROUGH = {"MainReportVersion", "EndOfRunSummary", "LogFreshnessResult",
                 "CommandCompleted", "LogSeedResult", "LogSnapshotResult"}
@@ -48,9 +48,16 @@ cw = {"name": 0, "mat": 0, "rel": 0, "dur": 0}
 def pad(val, col):
     return val.ljust(cw[col])
 
+INDENT_MODEL = "  "
+INDENT_TEST = "      "
+INDENT_EXTRA = len(INDENT_TEST) - len(INDENT_MODEL)
+
 def render(m):
     s = m["st"]
-    n = pad(m["name"], "name")
+    is_test = m.get("rtype") == "test"
+    indent = INDENT_TEST if is_test else INDENT_MODEL
+    name_w = max(cw["name"] - (INDENT_EXTRA if is_test else 0), len(m["name"]))
+    n = m["name"].ljust(name_w)
     mat = pad(m.get("mat", ""), "mat")
     if s == "running":
         elapsed = ""
@@ -61,18 +68,18 @@ def render(m):
                 elapsed = f"{int(e // 60)}m{int(e % 60):02d}s"
             else:
                 elapsed = f"{e:.0f}s"
-        return f"  {YELLOW}{SPIN[tick % len(SPIN)]} {n}  {mat}  {elapsed}{RESET}"
+        return f"{indent}{YELLOW}{SPIN[tick % len(SPIN)]} {n}  {mat}  {elapsed}{RESET}"
     dur = pad(m.get("dur", ""), "dur")
     ts = m.get("end_ts", "")
     rel = pad(m.get("rel", ""), "rel")
     cols = f"  {DIM}{mat}  {rel}  {dur}  {ts}{RESET}"
     if s in ("success", "pass"):
-        return f"  {GREEN}\u2713 {n}{RESET}{cols}"
+        return f"{indent}{GREEN}\u2713 {n}{RESET}{cols}"
     if s in ("error", "fail"):
-        return f"  {RED}\u2717 {n}{RESET}{cols}"
+        return f"{indent}{RED}\u2717 {n}{RESET}{cols}"
     if s == "warn":
-        return f"  {YELLOW}! {n}{RESET}{cols}"
-    return f"  {DIM}\u25cb {n}  skipped{RESET}"
+        return f"{indent}{YELLOW}! {n}{RESET}{cols}"
+    return f"{indent}{DIM}\u25cb {n}  skipped{RESET}"
 
 def update_line(idx):
     up = total + extra - nodes[idx]["line"] - 1
@@ -137,11 +144,22 @@ def process(line):
     status = (node.get("node_status") or "").lower()
     if not uid or rtype not in SHOW_TYPES or not name:
         return
-    MAX_NAME = 80
+    parent_name = None
     if rtype == "test":
-        label = f"test: {name}"
-        if len(label) > MAX_NAME:
-            label = label[:MAX_NAME - 1] + "\u2026"
+        max_test_name = 80 - INDENT_EXTRA
+        for n in nodes:
+            if n.get("rtype") == "model" and n["raw_name"] in (uid or ""):
+                parent_name = n["raw_name"]
+                break
+        if parent_name:
+            parts = name.split(parent_name)
+            ttype = parts[0].rstrip("_") if parts[0] else name
+            rest = parts[1].lstrip("_") if len(parts) > 1 and parts[1] else ""
+            label = f"\u21b3 {parent_name}: {ttype}({rest})" if rest else f"\u21b3 {parent_name}: {ttype}"
+        else:
+            label = f"test: {name}"
+        if len(label) > max_test_name:
+            label = label[:max_test_name - 1] + "\u2026"
     else:
         label = name
     mat = node.get("materialized", "") if rtype == "model" else rtype
@@ -150,12 +168,17 @@ def process(line):
     schema = nr.get("schema") or node.get("schema", "")
     alias = nr.get("alias") or node.get("alias", "") or name
     rel = ".".join(p for p in [db, schema, alias] if p) if rtype == "model" else ""
-    if status in STARTED and uid not in seen:
-        seen.add(uid)
-        m = {"uid": uid, "name": label, "start_ts": ts, "st": "running", "line": total}
+    if status in STARTED and uid not in id_idx:
+        m = {"uid": uid, "name": label, "raw_name": name, "rtype": rtype, "start_ts": ts, "st": "running", "line": total}
         if mat:
             m["mat"] = mat
-        changed = grow_col("name", label) or grow_col("mat", mat)
+        if rtype == "test" and parent_name:
+            m["parent"] = parent_name
+            if parent_name not in model_tests:
+                model_tests[parent_name] = []
+            model_tests[parent_name].append(uid)
+        eff_name = label if rtype != "test" else label + " " * INDENT_EXTRA
+        changed = grow_col("name", eff_name) or grow_col("mat", mat)
         id_idx[uid] = len(nodes)
         nodes.append(m)
         if changed and len(nodes) > 1:
@@ -163,8 +186,7 @@ def process(line):
         W(render(m) + "\n")
         sys.stdout.flush()
         total += 1
-    elif status in FINISHED and uid in seen:
-        seen.discard(uid)
+    elif status in FINISHED and uid in id_idx:
         idx = id_idx[uid]
         m = nodes[idx]
         m["st"] = status
@@ -175,14 +197,40 @@ def process(line):
         if ts and m.get("start_ts"):
             d = (ts - m["start_ts"]).total_seconds()
             m["dur"] = f"{d:.1f}s"
+            m["_dur_raw"] = d
             grow_col("dur", m["dur"])
         if ts:
             m["end_ts"] = ts.strftime("%H:%M:%S")
+            m["_end_ts_raw"] = ts
         changed = grow_col("mat", mat) or grow_col("rel", rel)
         if changed:
             rerender_all()
         else:
             update_line(idx)
+
+def print_test_summaries():
+    if not model_tests:
+        return
+    for parent, test_uids in model_tests.items():
+        test_nodes = [nodes[id_idx[u]] for u in test_uids if u in id_idx]
+        if not test_nodes:
+            continue
+        starts = [t["start_ts"] for t in test_nodes if t.get("start_ts")]
+        ends = [t.get("_end_ts_raw") for t in test_nodes if t.get("_end_ts_raw")]
+        agg = sum((t.get("_dur_raw", 0) for t in test_nodes), 0)
+        wall = ""
+        if starts and ends:
+            span = (max(ends) - min(starts)).total_seconds()
+            wall = f"wall {span:.1f}s"
+        ct = len(test_nodes)
+        passed = sum(1 for t in test_nodes if t["st"] in ("pass", "success"))
+        failed = ct - passed
+        agg_s = f"sum {agg:.1f}s"
+        status_txt = f"{passed}/{ct} passed"
+        if failed:
+            status_txt = f"{RED}{status_txt}{RESET}"
+        W(f"      {DIM}\u2514\u2500 {parent} tests: {status_txt}  {DIM}{agg_s}  {wall}{RESET}\n")
+    sys.stdout.flush()
 
 def print_issues():
     if not issues:
@@ -208,6 +256,7 @@ while True:
     else:
         if any(m["st"] == "running" for m in nodes):
             tick_spinners()
+print_test_summaries()
 print_issues()
 PYEOF
 
