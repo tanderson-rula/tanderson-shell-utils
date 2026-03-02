@@ -356,6 +356,73 @@ _dbd_complete() {
   fi
 }
 
+# --- sqlfluff wrappers ---
+
+# Resolve a dbt model name to its .sql file path under models/
+_dbt_model_to_file() {
+  local model="$1"
+  if [[ -z "$model" ]]; then
+    echo "Error: no model name provided" >&2
+    return 1
+  fi
+  # If it's already a file path, use it directly
+  if [[ "$model" == *.sql ]]; then
+    echo "$model"
+    return 0
+  fi
+  local -a matches
+  matches=(models/**/${model}.sql(N))
+  if (( ${#matches} == 0 )); then
+    echo "Error: no file found for model '$model'" >&2
+    return 1
+  fi
+  if (( ${#matches} > 1 )); then
+    echo "Warning: multiple files found for '$model', using first match" >&2
+  fi
+  echo "${matches[1]}"
+}
+
+# sqlfluff lint on one or more dbt models (by name)
+dbl() {
+  if (( $# < 1 )); then
+    echo "Usage: dbl <model> [model ...]"
+    return 1
+  fi
+  local -a files
+  for model in "$@"; do
+    local f
+    f="$(_dbt_model_to_file "$model")" || return 1
+    files+=("$f")
+  done
+  echo "Running: sqlfluff lint ${files[*]}"
+  sqlfluff lint "${files[@]}"
+}
+
+# sqlfluff fix on one or more dbt models (by name)
+dbf() {
+  if (( $# < 1 )); then
+    echo "Usage: dbf <model> [model ...]"
+    return 1
+  fi
+  local -a files
+  for model in "$@"; do
+    local f
+    f="$(_dbt_model_to_file "$model")" || return 1
+    files+=("$f")
+  done
+  echo "Running: sqlfluff fix ${files[*]}"
+  sqlfluff fix "${files[@]}"
+}
+
+# Completion for sqlfluff wrappers — model names only, no graph operators
+_dbl_complete() {
+  _dbt_fs_refresh_models
+  compadd -- $_DBT_FS_MODEL_CACHE
+}
+
+compdef _dbl_complete dbl
+compdef _dbl_complete dbf
+
 compdef _dbd_complete dbd
 compdef _dbd_complete dbdp
 compdef _dbd_complete dbr
