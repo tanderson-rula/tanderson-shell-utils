@@ -262,19 +262,47 @@ PYEOF
 
 # --- core helpers ---
 
+# Parse --vars from args, merging with dev_disable: true.
+# Sets _dbt_merged_vars and _dbt_remaining_args in the caller's scope.
+_dbt_extract_vars() {
+  _dbt_remaining_args=()
+  local user_vars=""
+  local i=1
+  while (( i <= $# )); do
+    if [[ "${@[$i]}" == "--vars" ]] && (( i < $# )); then
+      user_vars="${@[$((i+1))]}"
+      (( i += 2 ))
+    elif [[ "${@[$i]}" == --vars=* ]]; then
+      user_vars="${@[$i]#--vars=}"
+      (( i++ ))
+    else
+      _dbt_remaining_args+=("${@[$i]}")
+      (( i++ ))
+    fi
+  done
+  _dbt_merged_vars="dev_disable: true"
+  [[ -n "$user_vars" ]] && _dbt_merged_vars="${_dbt_merged_vars}, ${user_vars}"
+}
+
 # Run a dbt subcommand with standard deferral flags
 _dbt_deferred() {
   local dbt_bin="$(_dbt_bin)"
-  echo "Running: dbt $* --vars 'dev_disable: true' --defer --state deferral"
-  "$dbt_bin" "$@" --vars 'dev_disable: true' --defer --state deferral
+  local -a _dbt_remaining_args
+  local _dbt_merged_vars
+  _dbt_extract_vars "$@"
+  echo "Running: dbt ${_dbt_remaining_args[*]} --vars '${_dbt_merged_vars}' --defer --state deferral"
+  "$dbt_bin" "${_dbt_remaining_args[@]}" --vars "$_dbt_merged_vars" --defer --state deferral
 }
 
 # Run a dbt subcommand with deferral flags + pretty log formatter
 _dbt_deferred_pretty() {
   local dbt_bin="$(_dbt_bin)"
-  echo "Running: dbt $* --vars 'dev_disable: true' --defer --state deferral (pretty)"
+  local -a _dbt_remaining_args
+  local _dbt_merged_vars
+  _dbt_extract_vars "$@"
+  echo "Running: dbt ${_dbt_remaining_args[*]} --vars '${_dbt_merged_vars}' --defer --state deferral (pretty)"
   setopt localoptions pipefail
-  "$dbt_bin" "$@" --vars 'dev_disable: true' --defer --state deferral --log-format json 2>&1 \
+  "$dbt_bin" "${_dbt_remaining_args[@]}" --vars "$_dbt_merged_vars" --defer --state deferral --log-format json 2>&1 \
     | python3 -u -c "$_DBT_FMT"
 }
 
