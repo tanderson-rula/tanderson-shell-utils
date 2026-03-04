@@ -280,8 +280,15 @@ _dbt_extract_vars() {
       (( i++ ))
     fi
   done
-  _dbt_merged_vars="dev_disable: true"
-  [[ -n "$user_vars" ]] && _dbt_merged_vars="${_dbt_merged_vars}, ${user_vars}"
+  local _default="dev_disable: true"
+  if [[ -n "$user_vars" ]]; then
+    # Strip surrounding braces from both sides before merging
+    local _u="${user_vars#\{}"; _u="${_u%\}}"
+    local _d="${_default#\{}"; _d="${_d%\}}"
+    _dbt_merged_vars="{${_d}, ${_u}}"
+  else
+    _dbt_merged_vars="{${_default}}"
+  fi
 }
 
 # Run a dbt subcommand with standard deferral flags
