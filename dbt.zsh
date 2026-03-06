@@ -11,7 +11,7 @@ _dbt_bin() {
 
 # --- shared log formatter (Python, no single quotes) ---
 read -r -d '' _DBT_FMT <<'PYEOF'
-import sys, json, datetime as dt, select
+import sys, json, datetime as dt, select, signal
 
 W = sys.stdout.write
 YELLOW = "\033[33m"; GREEN = "\033[32m"; RED = "\033[31m"
@@ -35,6 +35,33 @@ extra = 0
 tick = 0
 issues = []
 model_tests = {}  # model_name -> [uid, ...]
+source_tests = {}  # source_name -> [uid, ...]
+source_headers = {}  # source_name -> uid of virtual header node
+
+_source_test_info = {}
+try:
+    import os
+    _mpath = os.path.join("target", "manifest.json")
+    if os.path.exists(_mpath):
+        with open(_mpath) as _mf:
+            _manifest = json.load(_mf)
+        for _uid, _node in _manifest.get("nodes", {}).items():
+            if _node.get("resource_type") != "test":
+                continue
+            _deps = _node.get("depends_on", {}).get("nodes", [])
+            _src_deps = [d for d in _deps if d.startswith("source.")]
+            if not _src_deps:
+                continue
+            _sp = _src_deps[0].split(".")
+            if len(_sp) < 4:
+                continue
+            _tmeta = _node.get("test_metadata", {})
+            _ttype = _tmeta.get("name", "test")
+            _col = _tmeta.get("kwargs", {}).get("column_name", "")
+            _source_test_info[_uid] = (_sp[2], _ttype, _sp[3], _col)
+        del _manifest
+except Exception:
+    pass
 
 PASS_THROUGH = {"MainReportVersion", "EndOfRunSummary", "LogFreshnessResult",
                 "CommandCompleted", "LogSeedResult", "LogSnapshotResult"}
@@ -55,11 +82,14 @@ INDENT_EXTRA = len(INDENT_TEST) - len(INDENT_MODEL)
 def render(m):
     s = m["st"]
     is_test = m.get("rtype") == "test"
+    is_source = m.get("rtype") == "source"
     indent = INDENT_TEST if is_test else INDENT_MODEL
     name_w = max(cw["name"] - (INDENT_EXTRA if is_test else 0), len(m["name"]))
     n = m["name"].ljust(name_w)
     mat = pad(m.get("mat", ""), "mat")
     if s == "running":
+        if is_source:
+            return f"{indent}{DIM}{SPIN[tick % len(SPIN)]} {n}  {mat}{RESET}"
         elapsed = ""
         st = m.get("start_ts")
         if st:
@@ -145,6 +175,7 @@ def process(line):
     if not uid or rtype not in SHOW_TYPES or not name:
         return
     parent_name = None
+    is_source_test = False
     if rtype == "test":
         max_test_name = 80 - INDENT_EXTRA
         for n in nodes:
@@ -157,7 +188,15 @@ def process(line):
             rest = parts[1].lstrip("_") if len(parts) > 1 and parts[1] else ""
             label = f"\u21b3 {parent_name}: {ttype}({rest})" if rest else f"\u21b3 {parent_name}: {ttype}"
         else:
-            label = f"test: {name}"
+            src_info = _source_test_info.get(uid)
+            if src_info:
+                src, ttype, table, col = src_info
+                parent_name = src
+                is_source_test = True
+                detail = f"{table}.{col}" if col else table
+                label = f"\u21b3 {ttype}({detail})" if detail else f"\u21b3 {ttype}"
+            else:
+                label = f"test: {name}"
         if len(label) > max_test_name:
             label = label[:max_test_name - 1] + "\u2026"
     else:
@@ -169,10 +208,30 @@ def process(line):
     alias = nr.get("alias") or node.get("alias", "") or name
     rel = ".".join(p for p in [db, schema, alias] if p) if rtype == "model" else ""
     if status in STARTED and uid not in id_idx:
+        if is_source_test and parent_name and parent_name not in source_headers:
+            src_uid = f"__source__.{parent_name}"
+            src_m = {"uid": src_uid, "name": parent_name, "raw_name": parent_name,
+                     "rtype": "source", "mat": "source", "st": "running",
+                     "start_ts": ts, "line": total}
+            grow_col("name", parent_name)
+            grow_col("mat", "source")
+            source_headers[parent_name] = src_uid
+            id_idx[src_uid] = len(nodes)
+            nodes.append(src_m)
+            if len(nodes) > 1:
+                rerender_all()
+            W(render(src_m) + "\n")
+            sys.stdout.flush()
+            total += 1
         m = {"uid": uid, "name": label, "raw_name": name, "rtype": rtype, "start_ts": ts, "st": "running", "line": total}
         if mat:
             m["mat"] = mat
-        if rtype == "test" and parent_name:
+        if is_source_test and parent_name:
+            m["parent"] = parent_name
+            if parent_name not in source_tests:
+                source_tests[parent_name] = []
+            source_tests[parent_name].append(uid)
+        elif rtype == "test" and parent_name:
             m["parent"] = parent_name
             if parent_name not in model_tests:
                 model_tests[parent_name] = []
@@ -207,11 +266,17 @@ def process(line):
             rerender_all()
         else:
             update_line(idx)
+        parent = m.get("parent")
+        if parent and parent in source_headers:
+            test_uids = source_tests.get(parent, [])
+            if test_uids and all(nodes[id_idx[u]]["st"] in FINISHED for u in test_uids if u in id_idx):
+                src_idx = id_idx[source_headers[parent]]
+                any_fail = any(nodes[id_idx[u]]["st"] in ("error", "fail") for u in test_uids if u in id_idx)
+                nodes[src_idx]["st"] = "fail" if any_fail else "success"
+                update_line(src_idx)
 
-def print_test_summaries():
-    if not model_tests:
-        return
-    for parent, test_uids in model_tests.items():
+def _summarize_tests(group, label_prefix=""):
+    for parent, test_uids in group.items():
         test_nodes = [nodes[id_idx[u]] for u in test_uids if u in id_idx]
         if not test_nodes:
             continue
@@ -229,8 +294,15 @@ def print_test_summaries():
         status_txt = f"{passed}/{ct} passed"
         if failed:
             status_txt = f"{RED}{status_txt}{RESET}"
-        W(f"      {DIM}\u2514\u2500 {parent} tests: {status_txt}  {DIM}{agg_s}  {wall}{RESET}\n")
+        name = f"{label_prefix}{parent}" if label_prefix else parent
+        W(f"      {DIM}\u2514\u2500 {name} tests: {status_txt}  {DIM}{agg_s}  {wall}{RESET}\n")
     sys.stdout.flush()
+
+def print_test_summaries():
+    if model_tests:
+        _summarize_tests(model_tests)
+    if source_tests:
+        _summarize_tests(source_tests)
 
 def print_issues():
     if not issues:
@@ -244,6 +316,13 @@ def print_issues():
             W(f"  {YELLOW}! {msg}{RESET}\n")
     W(f"{RED}{rule}{RESET}\n")
     sys.stdout.flush()
+
+def _sigint(sig, frame):
+    W("\n")
+    print_test_summaries()
+    print_issues()
+    sys.exit(130)
+signal.signal(signal.SIGINT, _sigint)
 
 fd = sys.stdin.fileno()
 while True:
@@ -308,9 +387,18 @@ _dbt_deferred_pretty() {
   local _dbt_merged_vars
   _dbt_extract_vars "$@"
   echo "Running: dbt ${_dbt_remaining_args[*]} --vars '${_dbt_merged_vars}' --defer --state deferral (pretty)"
-  setopt localoptions pipefail
-  "$dbt_bin" "${_dbt_remaining_args[@]}" --vars "$_dbt_merged_vars" --defer --state deferral --log-format json 2>&1 \
-    | python3 -u -c "$_DBT_FMT"
+  setopt localoptions localtraps nomonitor
+  local fifo=$(mktemp -u "${TMPDIR:-/tmp}/dbt-fmt.XXXXXX")
+  mkfifo "$fifo"
+  "$dbt_bin" "${_dbt_remaining_args[@]}" --vars "$_dbt_merged_vars" --defer --state deferral --log-format json >"$fifo" 2>&1 &
+  local dbt_pid=$!
+  trap "kill $dbt_pid 2>/dev/null; wait $dbt_pid 2>/dev/null; rm -f $fifo; trap - INT; return 130" INT
+  python3 -u -c "$_DBT_FMT" < "$fifo"
+  local rc=$?
+  wait $dbt_pid 2>/dev/null
+  rm -f "$fifo"
+  trap - INT
+  return $rc
 }
 
 # --- user-facing commands ---
